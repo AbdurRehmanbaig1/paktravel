@@ -1,5 +1,5 @@
 const express = require('express');
-const { addTour, getAllTours, getTourById } = require('../controllers/tourController');
+const { addTour, getAllTours, getTourById, deleteTour } = require('../controllers/tourController');
 
 const router = express.Router();
 
@@ -11,5 +11,8 @@ router.get('/', getAllTours);
 
 // GET /api/tours/:clientPhone/:tourId - Get tour by ID
 router.get('/:clientPhone/:tourId', getTourById);
+
+// DELETE /api/tours/:clientPhone/:tourId - Delete tour
+router.delete('/:clientPhone/:tourId', deleteTour);
 
 module.exports = router; 

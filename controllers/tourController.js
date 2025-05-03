@@ -17,6 +17,7 @@ exports.addTour = async (req, res) => {
       address,
       city,
       country,
+      destination,
       description
     } = req.body;
 
@@ -35,12 +36,16 @@ exports.addTour = async (req, res) => {
     // Determine currency if not provided (for backward compatibility)
     const tourCurrency = currency || (type === 'local' || type === 'honeymoon' ? 'PKR' : 'USD');
 
+    // Create batch to ensure all operations are atomic
+    const batch = db.batch();
+
     // Check if client exists - if not, create a new client
-    const clientDoc = await db.collection('clients').doc(clientPhone).get();
+    const clientDocRef = db.collection('clients').doc(clientPhone);
+    const clientDoc = await clientDocRef.get();
     
     if (!clientDoc.exists) {
       // Create a new client
-      await db.collection('clients').doc(clientPhone).set({
+      batch.set(clientDocRef, {
         name: clientName,
         email: clientEmail,
         phoneNumber: clientPhone,
@@ -58,7 +63,7 @@ exports.addTour = async (req, res) => {
     // Create a new tour in client's tours subcollection
     const tourRef = db.collection('clients').doc(clientPhone).collection('tours').doc();
     
-    await tourRef.set({
+    batch.set(tourRef, {
       type,
       price: price ? Number(price) : 0,
       cost: cost ? Number(cost) : 0,
@@ -70,13 +75,60 @@ exports.addTour = async (req, res) => {
       address: address || '',
       city: city || '',
       country: country || '',
+      destination: destination || '',
       description: description || '',
       createdAt: new Date().toISOString()
     });
 
+    // Check if client already has a ledger
+    const clientLedgerQuery = await db.collection('client_ledgers')
+      .where('phone', '==', clientPhone)
+      .limit(1)
+      .get();
+    
+    let clientLedgerId = null;
+    
+    // If client doesn't have a ledger, create one with the tour price as the opening balance
+    if (clientLedgerQuery.empty) {
+      // Create a new client ledger with the tour price as totalDebit
+      const clientLedgerRef = db.collection('client_ledgers').doc();
+      clientLedgerId = clientLedgerRef.id;
+      
+      batch.set(clientLedgerRef, {
+        name: clientName,
+        phone: clientPhone,
+        notes: `Auto-created when adding tour of type: ${type}`,
+        totalDebit: price ? Number(price) : 0,
+        totalCredit: 0,
+        balance: price ? Number(price) : 0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      
+      // Add initial transaction if price > 0
+      if (price && Number(price) > 0) {
+        const txnRef = db.collection('client_ledgers').doc(clientLedgerId).collection('transactions').doc();
+        batch.set(txnRef, {
+          type: 'debit',
+          amount: Number(price),
+          description: `Opening balance from ${type} tour to ${destination || country || 'destination not specified'}`,
+          date: new Date(),
+          createdAt: new Date(),
+          paymentMethod: 'Opening Balance',
+          reference: `Tour ID: ${tourRef.id}`
+        });
+      }
+    } else {
+      console.log('Client ledger already exists. Tour price will not be added as a new opening balance.');
+    }
+
+    // Commit all changes as a batch operation
+    await batch.commit();
+
     return res.status(201).json({ 
-      message: 'Tour added successfully',
-      tourId: tourRef.id
+      message: 'Tour added successfully with ledger entry',
+      tourId: tourRef.id,
+      ledgerId: clientLedgerId
     });
   } catch (error) {
     console.error('Error adding tour:', error);
@@ -144,5 +196,43 @@ exports.getTourById = async (req, res) => {
   } catch (error) {
     console.error('Error fetching tour:', error);
     return res.status(500).json({ error: 'Failed to fetch tour details' });
+  }
+};
+
+// Delete a tour
+exports.deleteTour = async (req, res) => {
+  try {
+    const { clientPhone, tourId } = req.params;
+    
+    if (!clientPhone || !tourId) {
+      return res.status(400).json({ error: 'Client phone and tour ID are required' });
+    }
+    
+    // Check if client exists
+    const clientRef = db.collection('clients').doc(clientPhone);
+    const clientDoc = await clientRef.get();
+    
+    if (!clientDoc.exists) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+    
+    // Check if tour exists
+    const tourRef = clientRef.collection('tours').doc(tourId);
+    const tourDoc = await tourRef.get();
+    
+    if (!tourDoc.exists) {
+      return res.status(404).json({ error: 'Tour not found' });
+    }
+    
+    // Delete the tour
+    await tourRef.delete();
+    
+    return res.status(200).json({ 
+      message: 'Tour deleted successfully',
+      tourId: tourId
+    });
+  } catch (error) {
+    console.error('Error deleting tour:', error);
+    return res.status(500).json({ error: 'Failed to delete tour' });
   }
 }; 
